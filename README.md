@@ -19,10 +19,45 @@
 Geminiのレート制限（HTTP 429 等）やネットワークエラーに達した場合、パニックを起こしません。
 代わりに、**Claude Code が解釈して自律実行できる特別な「フォールバックメッセージ」を出力して正常終了 (exit 0)** します。これにより、Claude は即座に「自分の力だけでタスクを完了する」自律解決モードへ移行します。
 
-## ⚙️ セットアップとキー管理
+## ⚙️ セットアップ
+
+### 1. ファイルの配置
+
+`ask-gemini.mjs` と `Claude_ask-gemini.md` を、対象の Git リポジトリの**ルートディレクトリ**にコピーします。
+
+```
+your-project/
+├── ask-gemini.mjs       ← ここに置く
+├── Claude_ask-gemini.md ← ここに置く
+└── ... (既存のファイル)
+```
+
+### 2. 初回起動（自動セットアップ）
+
+初回起動時に、以下の内容を対話形式で確認・実行します。
+
+```
+[初回セットアップ] 以下の処理を行います：
+  1. Gemini API キーを ~/.ask-geminirc.json に保存 (パーミッション 0o600)
+  2. ask-gemini.mjs と .ask-gemini-log.json を .git/info/exclude に追記
+     （これらのファイルをプロジェクトの git 管理対象から除外します）
+
+  claude.md への統合（任意）:
+  3. Claude_ask-gemini.md の内容を claude.md に追記します
+     ※ claude.md が存在する場合は末尾に追記、存在しない場合は新規作成
+
+続行しますか？ [Y/n]:
+```
+
+処理 1〜2 はツールの動作に必要なセットアップです。処理 3 は任意で、Claude Code との `@gemini` ショートカット連携を有効にします。
+
+> **Note**: `.git/info/exclude` はローカル専用の除外設定です。プロジェクトの `.gitignore` は一切変更しません。
+
+### キー管理
 
 * **依存関係ゼロ（Zero-Dependency）**: `fs`, `child_process`, `https(fetch)` のみを使用。
-* **セキュアなキー保存**: 初回起動時にターミナルで対話形式で Gemini API キーの入力を求めます。OSのホームディレクトリ（`~/.ask-geminirc.json`）にパーミッション `0o600` で永続保存します。
+* **セキュアなキー保存**: Gemini API キーは `~/.ask-geminirc.json` にパーミッション `0o600` で保存されます。
+* **キーの再設定**: `node ask-gemini.mjs --reset-key` で既存のキーを削除・再設定できます。
 
 ## 🚀 使い方
 
@@ -46,22 +81,26 @@ node ask-gemini.mjs "この画像のズレを直して" --attach "./error.png" #
 
 ## 🤖 【超重要】Claude Code（claude.md）との完全連携
 
-Claude Code の指示ファイル（カレントディレクトリの `claude.md` や `CLAUDE.md`）に以下を追記することで、「画像付きの指示」も全自動でGeminiへパスできるようになります。
+`Claude_ask-gemini.md` の内容を Claude Code の指示ファイル（`claude.md`）に追記することで、`@gemini` ショートカットが有効になります。
+
+**追記方法**（初回セットアップ時の対話で自動追記することも可能です）:
+
+```bash
+cat Claude_ask-gemini.md >> claude.md
+```
+
+追記後は、以下のように `@gemini` で始めるだけで Gemini への分析依頼が完結します：
 
 ```
-## @gemini ショートカット
-メッセージの文頭が `@gemini ` で始まる場合、以下のコマンドを自動実行する：
-`node <ask-gemini.mjsの絶対パス> "<@gemini の後ろのテキスト>"`
-
-### ⚠️ マルチモーダル（画像転送）の絶対ルール
-もしユーザーのメッセージに「画像ファイル（スクリーンショット等）」や「PDFファイル」が添付されている場合、Claude 自身がそれを見るだけでなく、Gemini にも視覚情報を共有するために、必ずコマンドの末尾に `--attach` オプションを用いてファイルの絶対パスを渡して実行すること。
-
-【コマンド生成例】
-入力: 「@gemini このスクショのようにレイアウト崩れてるの直して（error.png を添付）」
-実行: `node <ask-gemini.mjsの絶対パス> "このスクショのようにレイアウト崩れてるの直して" --attach "/絶対パス/error.png"`
-
-（※添付ファイルが複数ある場合は `--attach "パスA" --attach "パスB"` と列挙すること）
+@gemini カレンダーコンポーネントの表示崩れを治して
+@gemini このスクショのようにレイアウト崩れてるの直して  # スクリーンショットを添付した場合
 ```
+
+`Claude_ask-gemini.md` の内容には以下が含まれています：
+
+- `@gemini` ショートカットの定義と画像転送ルール
+- plan 受け取り後の必須チェック項目（不正な計画書の実行を防止）
+- 実行中の Fallback Protocol（エラー時の即時停止・報告フォーマット）
 
 ---
 
