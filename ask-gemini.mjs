@@ -249,7 +249,10 @@ async function callGemini(apiKey, systemInstruction, parts) {
   if (!data.candidates || data.candidates.length === 0) {
     throw new Error('空レスポンス: ' + JSON.stringify(data));
   }
-  return data.candidates[0].content.parts[0].text;
+  return {
+    text: data.candidates[0].content.parts[0].text,
+    usage: data.usageMetadata ?? {}
+  };
 }
 
 async function main() {
@@ -371,10 +374,16 @@ ${userPrompt}
 ${codebaseContext}
 `;
 
+  // コードベース全体の推定トークン数（ask-gemini を使わず Claude に直接渡した場合の比較基準）
+  const baselineTokens = Math.round(codebaseContext.length / 4);
+
   let step1Result = '';
+  let step1Usage = {};
   try {
-    step1Result = await callGemini(apiKey, step1SystemInstruction, [{ text: step1Prompt }, ...attachParts]);
-    writeLog({ step: 1, status: 'success', prompt: userPrompt, result: step1Result });
+    const res1 = await callGemini(apiKey, step1SystemInstruction, [{ text: step1Prompt }, ...attachParts]);
+    step1Result = res1.text;
+    step1Usage = res1.usage;
+    writeLog({ step: 1, status: 'success', prompt: userPrompt, result: step1Result, geminiUsage: step1Usage });
     process.stderr.write('[Step 1/2] 完了。\n');
   } catch (err) {
     writeLog({ step: 1, status: 'error', error: err.message || err });
@@ -435,11 +444,37 @@ ${step1Result}
 `;
 
   let step2Result = '';
+  let step2Usage = {};
   try {
     // Step2ではソース全体ではなくStep1結果のみ食わせる（トークン節約）
-    step2Result = await callGemini(apiKey, step2SystemInstruction, [{ text: step2Prompt }]);
-    writeLog({ step: 2, status: 'success', result: step2Result });
+    const res2 = await callGemini(apiKey, step2SystemInstruction, [{ text: step2Prompt }]);
+    step2Result = res2.text;
+    step2Usage = res2.usage;
+    // Claudeが受け取るplanの推定トークン数
+    const planTokens = Math.round(step2Result.length / 4);
+    writeLog({ step: 2, status: 'success', result: step2Result, geminiUsage: step2Usage });
     process.stderr.write('[Step 2/2] 完了。\n');
+
+    // トークン使用量サマリー
+    const step1Prompt_tokens = step1Usage.promptTokenCount ?? '?';
+    const step1Output_tokens = step1Usage.candidatesTokenCount ?? '?';
+    const step2Prompt_tokens = step2Usage.promptTokenCount ?? '?';
+    const step2Output_tokens = step2Usage.candidatesTokenCount ?? '?';
+    const geminiTotal = (step1Usage.totalTokenCount ?? 0) + (step2Usage.totalTokenCount ?? 0);
+    process.stderr.write(`
+┌─────────────────────────────────────────────┐
+│              Token Usage Summary            │
+├─────────────────────────────────────────────┤
+│ [Gemini] Step1 送信: ${String(step1Prompt_tokens).padStart(8)} tokens (推定)  │
+│ [Gemini] Step1 受信: ${String(step1Output_tokens).padStart(8)} tokens          │
+│ [Gemini] Step2 送信: ${String(step2Prompt_tokens).padStart(8)} tokens          │
+│ [Gemini] Step2 受信: ${String(step2Output_tokens).padStart(8)} tokens          │
+├─────────────────────────────────────────────┤
+│ [比較] コードベース全体 (推定): ${String(baselineTokens).padStart(8)} tokens  │
+│ [比較] Claudeに渡るplan (推定): ${String(planTokens).padStart(8)} tokens  │
+│ → Claudeの読み込みを約 ${String(baselineTokens > 0 ? Math.round(baselineTokens / Math.max(planTokens, 1)) : '?').padStart(3)}x 削減 (推定)   │
+└─────────────────────────────────────────────┘
+`);
   } catch (err) {
     writeLog({ step: 2, status: 'error', error: err.message || err });
     if (err.fallback) {
