@@ -5,32 +5,29 @@ import readline from 'readline';
 import { execSync } from 'child_process';
 
 const CONFIG_PATH = path.join(os.homedir(), '.ask-geminirc.json');
-// バイナリファイルや、Geminiに読ませる必要のない巨大なロックファイルを除外リスト化
-// SVGはテキストフォーマットのためGeminiに読ませる
 const BINARY_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.ico', '.ttf', '.woff', '.woff2', '.eot', '.apk', '.jar', '.pdf', '.zip', '.mp3', '.mp4', '.mov']);
 const IGNORED_FILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
 
 function showHelp() {
   console.log(`
 【 ask-gemini.mjs (AIオーケストレーション・プロキシツール) 】
-Gemini 1.5 Pro の大容量コンテキストを活用し、プロジェクト全体のコードを分析して
-Claude 向けの「手術計画書（Surgery Plan）」を出力します。
+Gemini 1.5 Pro の大容量コンテキストと言語/視覚のマルチモーダル能力を活用します。
 
 使用方法:
-  node ask-gemini.mjs "[プロンプト]"
+  node ask-gemini.mjs "[プロンプト]" [オプション]
 
-引数・オプション:
-  --help, -h, /help   このヘルプメッセージを表示して終了します。
+オプション:
+  --help, -h          このヘルプを表示して終了します。
   --reset-key         保存されている API キーを削除・再設定します。
+  --attach <パス>     画像やPDFなどの添付ファイルを指定します（複数指定可）。
+                      指定されたファイルはBase64化され、Geminiの視覚機能で解析されます。
 
 実例:
-  node ask-gemini.mjs "カレンダーコンポーネントの表示崩れを治すための手術計画書を作成して"
-  node ask-gemini.mjs --reset-key
+  node ask-gemini.mjs "カレンダーコンポーネントの表示崩れを治して" --attach "C:/path/to/error.png"
 `);
   process.exit(0);
 }
 
-// 初回APIキー入力のプロンプト
 async function askForApiKey() {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -44,7 +41,6 @@ async function askForApiKey() {
   });
 }
 
-// APIキーの強制リセット処理
 async function resetApiKey() {
   console.log('--- APIキーの再設定 ---');
   const newKey = await askForApiKey();
@@ -58,7 +54,6 @@ async function resetApiKey() {
   process.exit(0);
 }
 
-// APIキーの取得
 async function getApiKey() {
   if (fs.existsSync(CONFIG_PATH)) {
     try {
@@ -79,20 +74,47 @@ async function getApiKey() {
   return newKey;
 }
 
+// MIMEタイプを判定するヘルパー
+function getMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.webp': return 'image/webp';
+    case '.heic': return 'image/heic';
+    case '.heif': return 'image/heif';
+    case '.pdf': return 'application/pdf';
+    default: return 'application/octet-stream';
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   
-  // 何も入力されていない、またはヘルプオプションが存在する場合
   if (args.length === 0 || args.includes('--help') || args.includes('-h') || args.includes('/help')) {
     showHelp();
   }
 
-  // APIキーの再設定オプションが存在する場合
   if (args.includes('--reset-key') || args.includes('/reset-key')) {
     await resetApiKey();
   }
 
-  const userPrompt = args.join(' ');
+  // 引数のパース（プロンプト文字列と添付ファイルの分離）
+  let userPromptArgs = [];
+  let attachments = [];
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--attach' && i + 1 < args.length) {
+      attachments.push(args[i + 1]);
+      i++; // パス部分をスキップ
+    } else {
+      userPromptArgs.push(args[i]);
+    }
+  }
+  
+  // オプションフラグ（--xxx や /xxx）をuserPromptから除外する
+  const userPrompt = userPromptArgs.filter(a => !a.startsWith('--') && !a.startsWith('/')).join(' ');
   const apiKey = await getApiKey();
 
   // 1. Gitの管理対象ファイルをすべて取得
@@ -138,8 +160,38 @@ ${userPrompt}
 ${codebaseContext}
 `;
 
+  // マルチモーダル・パーツの構築（テキスト本文）
+  let parts = [{ text: finalPrompt }];
+
+  // 添付ファイルの処理（画像などのバイナリをBase64化して追加）
+  for (const attachmentPath of attachments) {
+    try {
+      if (fs.existsSync(attachmentPath)) {
+        // サイズチェック（10MB超はAPIエラーになるためスキップ）
+        const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+        const stat = fs.statSync(attachmentPath);
+        if (stat.size > MAX_ATTACH_BYTES) {
+          process.stderr.write(`[WARNING] 添付ファイルが大きすぎます(${Math.round(stat.size / 1024 / 1024)}MB)。スキップします: ${attachmentPath}\n`);
+          continue;
+        }
+        const mimeType = getMimeType(attachmentPath);
+        const data = fs.readFileSync(attachmentPath).toString("base64");
+        parts.push({
+          inlineData: {
+            mimeType: mimeType,
+            data: data
+          }
+        });
+      } else {
+        process.stderr.write(`[WARNING] 指定された添付ファイルが見つかりません: ${attachmentPath}\n`);
+      }
+    } catch (e) {
+      process.stderr.write(`[WARNING] 添付ファイルの読み込みに失敗しました (${attachmentPath}): ${e.message}\n`);
+    }
+  }
+
   const requestBody = {
-    contents: [{ parts: [{ text: finalPrompt }] }],
+    contents: [{ parts: parts }],
     systemInstruction: { parts: [{ text: systemInstruction }] }
   };
 
